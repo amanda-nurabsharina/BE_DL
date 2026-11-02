@@ -97,3 +97,34 @@ type Expense struct {
 func (Expense) TableName() string {
 	return "expenses"
 }
+
+type SalesPeriodItem struct {
+	PeriodLabel   string  `json:"period_label"`
+	OrdersCount   int     `json:"orders_count"`
+	GrossSales    float64 `json:"gross_sales"`
+	Discounts     float64 `json:"discounts"`
+	NetOmzet      float64 `json:"net_omzet"`
+	PaidCollected float64 `json:"paid_collected"`
+	UnpaidBalance float64 `json:"unpaid_balance"`
+}
+
+type FinanceReportSummary struct {
+	DailyOmzet           float64           `json:"daily_omzet"`
+	DailyOrdersCount     int               `json:"daily_orders_count"`
+	MonthlyOmzet         float64           `json:"monthly_omzet"`
+	MonthlyOrdersCount   int               `json:"monthly_orders_count"`
+	TotalInvoiced        float64           `json:"total_invoiced"`
+	TotalPaid            float64           `json:"total_paid"`
+	TotalReceivables     float64           `json:"total_receivables"`
+	PaidInvoicesCount    int               `json:"paid_invoices_count"`
+	UnpaidInvoicesCount  int               `json:"unpaid_invoices_count"`
+	MaterialCost         float64           `json:"material_cost"`
+	LaborCost            float64           `json:"labor_cost"`
+	OperationalCost      float64           `json:"operational_cost"`
+	TotalExpenses        float64           `json:"total_expenses"`
+	GrossProfit          float64           `json:"gross_profit"`
+	NetOperatingProfit   float64           `json:"net_operating_profit"`
+	ActiveCustomersCount int               `json:"active_customers_count"`
+	DailyBreakdown       []SalesPeriodItem `json:"daily_breakdown"`
+	MonthlyBreakdown     []SalesPeriodItem `json:"monthly_breakdown"`
+}

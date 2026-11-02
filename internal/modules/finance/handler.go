@@ -18,18 +18,47 @@ func NewHandler(service *Service) *Handler {
 func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handler) {
 	group := router.Group("/finance", authMiddleware)
 
+	// Sales & Finance Summary Report
+	group.Get("/summary", h.GetFinanceSummary)
+
 	// Invoices
 	group.Get("/invoices", h.ListInvoices)
 	group.Get("/invoices/:id", h.GetInvoiceByID)
-	group.Post("/invoices", middleware.RequireRole("OWNER", "ADMIN", "CASHIER"), h.CreateInvoiceFromOrder)
+	group.Post("/invoices", middleware.RequireRole("SUPER_ADMIN", "OWNER", "ADMIN", "CASHIER"), h.CreateInvoiceFromOrder)
+	group.Post("/invoices/sync", middleware.RequireRole("SUPER_ADMIN", "OWNER", "ADMIN", "CASHIER"), h.SyncInvoicesFromProduction)
 
 	// Payments
-	group.Post("/payments", middleware.RequireRole("OWNER", "ADMIN", "CASHIER"), h.RecordPayment)
+	group.Post("/payments", middleware.RequireRole("SUPER_ADMIN", "OWNER", "ADMIN", "CASHIER"), h.RecordPayment)
 
 	// Expenses
 	group.Get("/expense-categories", h.ListExpenseCategories)
 	group.Get("/expenses", h.ListExpenses)
-	group.Post("/expenses", middleware.RequireRole("OWNER", "ADMIN", "CASHIER"), h.CreateExpense)
+	group.Post("/expenses", middleware.RequireRole("SUPER_ADMIN", "OWNER", "ADMIN", "CASHIER"), h.CreateExpense)
+}
+
+func (h *Handler) GetFinanceSummary(c *fiber.Ctx) error {
+	summary, err := h.service.GetFinanceSummary()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": summary})
+}
+
+func (h *Handler) SyncInvoicesFromProduction(c *fiber.Ctx) error {
+	var createdBy *uuid.UUID
+	userIDStr, _ := c.Locals("user_id").(string)
+	if uid, err := uuid.Parse(userIDStr); err == nil {
+		createdBy = &uid
+	}
+	count, err := h.service.SyncInvoicesFromProduction(createdBy)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{
+		"success":       true,
+		"synced_count":  count,
+		"message":       "Sinkronisasi invoice otomatis dari produksi berhasil",
+	})
 }
 
 func (h *Handler) ListInvoices(c *fiber.Ctx) error {

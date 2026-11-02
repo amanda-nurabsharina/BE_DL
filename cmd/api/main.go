@@ -67,7 +67,11 @@ func main() {
 	// 4. Register Services & Handlers
 	authMiddleware := middleware.AuthMiddleware(cfg.JWTSecret)
 
-	apiV1 := app.Group("/api/v1")
+	// Reports & Security Audit Module
+	repService := reports.NewService(db)
+	repHandler := reports.NewHandler(repService)
+
+	apiV1 := app.Group("/api/v1", repHandler.AuditTrailMiddleware(cfg.JWTSecret))
 
 	// Auth Module
 	authService := auth.NewService(db, cfg.JWTSecret)
@@ -94,9 +98,7 @@ func main() {
 	finHandler := finance.NewHandler(finService)
 	finHandler.RegisterRoutes(apiV1, authMiddleware)
 
-	// Reports Module
-	repService := reports.NewService(db)
-	repHandler := reports.NewHandler(repService)
+	// Register Reports Routes
 	repHandler.RegisterRoutes(apiV1, authMiddleware)
 
 	// 5. Start Server

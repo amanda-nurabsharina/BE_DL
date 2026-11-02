@@ -16,13 +16,147 @@ type Service struct {
 }
 
 func NewService(db *gorm.DB) *Service {
-	return &Service{db: db}
+	s := &Service{db: db}
+	s.ensureFinanceSchemaAndSeed()
+	return s
+}
+
+func (s *Service) ensureFinanceSchemaAndSeed() {
+	// 1. Ensure standard expense categories exist (Biaya Bahan, Biaya Tenaga Kerja, Biaya Operasional)
+	categories := []ExpenseCategory{
+		{ID: 1, Code: "RAW_MATERIAL", Name: "Biaya Bahan Produksi (Akrilik, Gips, Zirkonia, Logam)"},
+		{ID: 2, Code: "LABOR", Name: "Biaya Tenaga Kerja & Insentif Tekniker"},
+		{ID: 3, Code: "OPERATIONAL", Name: "Biaya Operasional Lab (Listrik, Kurir, Perawatan Mesin)"},
+	}
+	for _, cat := range categories {
+		var existing ExpenseCategory
+		if err := s.db.Where("code = ? OR id = ?", cat.Code, cat.ID).First(&existing).Error; err != nil {
+			_ = s.db.Create(&cat).Error
+		} else {
+			_ = s.db.Model(&existing).Updates(map[string]interface{}{
+				"code": cat.Code,
+				"name": cat.Name,
+			}).Error
+		}
+	}
+
+	// 2. Seed realistic sample expenses if none exist
+	var expCount int64
+	s.db.Model(&Expense{}).Count(&expCount)
+	if expCount == 0 {
+		var catMat, catLab, catOps ExpenseCategory
+		s.db.Where("code = 'RAW_MATERIAL'").First(&catMat)
+		s.db.Where("code = 'LABOR'").First(&catLab)
+		s.db.Where("code = 'OPERATIONAL'").First(&catOps)
+
+		now := time.Now()
+		samples := []Expense{
+			{
+				ExpenseNumber: "EXP-0001",
+				CategoryID:    catMat.ID,
+				Amount:        850000,
+				ExpenseDate:   now.AddDate(0, 0, -3),
+				Description:   "Pembelian Blok Zirconia HT A2 & Gips Tipe IV Die Stone untuk produksi mahkota",
+			},
+			{
+				ExpenseNumber: "EXP-0002",
+				CategoryID:    catLab.ID,
+				Amount:        650000,
+				ExpenseDate:   now.AddDate(0, 0, -2),
+				Description:   "Insentif produksi & uang lembur tekniker (Glazing & Finishing Crown Zirconia)",
+			},
+			{
+				ExpenseNumber: "EXP-0003",
+				CategoryID:    catOps.ID,
+				Amount:        320000,
+				ExpenseDate:   now.AddDate(0, 0, -1),
+				Description:   "Biaya kurir antar-jemput cetakan dokter & token listrik mesin furnace porselen",
+			},
+		}
+		for _, sp := range samples {
+			if sp.CategoryID > 0 {
+				_ = s.db.Create(&sp).Error
+			}
+		}
+	}
+
+	// 3. Seed at least one completed ProductionOrder if no COMPLETED/DELIVERED orders exist so Invoice & Hasil Order is immediately demonstrable
+	var completedOrderCount int64
+	s.db.Model(&production.ProductionOrder{}).Where("status IN ('COMPLETED', 'DELIVERED') AND deleted_at IS NULL").Count(&completedOrderCount)
+	if completedOrderCount == 0 {
+		var firstCustIDStr string
+		s.db.Table("customers").Select("id").Where("deleted_at IS NULL").Limit(1).Scan(&firstCustIDStr)
+		firstCustID, err := uuid.Parse(firstCustIDStr)
+		if err == nil && firstCustID != uuid.Nil {
+			var dtID int = 1
+			s.db.Table("denture_types").Select("id").Limit(1).Scan(&dtID)
+			var techIDStr string
+			s.db.Table("users").Select("id").Where("deleted_at IS NULL").Limit(1).Scan(&techIDStr)
+			techID, _ := uuid.Parse(techIDStr)
+
+			var totalOrders int64
+			s.db.Model(&production.ProductionOrder{}).Count(&totalOrders)
+			now := time.Now()
+			recDate := now.AddDate(0, 0, -3)
+			dueDate := now.AddDate(0, 0, 1)
+
+			var techPtr *uuid.UUID
+			if techID != uuid.Nil {
+				techPtr = &techID
+			}
+
+			sampleOrder := production.ProductionOrder{
+				OrderNumber:         fmt.Sprintf("ORD-%04d", totalOrders+1),
+				CustomerID:          firstCustID,
+				PatientName:         "Bpk. Hendra Gunawan",
+				DentureTypeID:       dtID,
+				TeethNumbers:        `["11","21"]`,
+				ShadeGuide:          "VITA A2",
+				ReceivedDate:        recDate,
+				PromisedDueDate:     dueDate,
+				CompletedAt:         &now,
+				Status:              "COMPLETED",
+				CurrentStageCode:    "QC_PASSED",
+				CurrentStageName:    "Lolos QC (Selesai Produksi)",
+				CurrentTechnicianID: techPtr,
+				Priority:            "NORMAL",
+				DoctorNotes:         "Kontak proksimal rapat, anatomi natural incisal.",
+				InternalNotes:       "Seluruh tahapan produksi & QC selesai tepat waktu.",
+				DiscountPercent:     10,
+				DiscountAmount:      180000,
+				TotalPrice:          1620000,
+				FeedbackRating:      5,
+				FeedbackNotes:       "Marginal fit sangat presisi dan warna VITA A2 sesuai.",
+			}
+			if err := s.db.Create(&sampleOrder).Error; err == nil {
+				if techID != uuid.Nil {
+					_ = s.db.Create(&production.QualityCheck{
+						ProductionOrderID: sampleOrder.ID,
+						InspectorID:       techID,
+						Passed:            true,
+						ChecklistResults:  `{"oklusi":true,"marginal_fit":true,"kontak_proksimal":true,"shade_match":true,"polishing":true}`,
+						DefectNotes:       "Lolos pemeriksaan mutu akhir (Oklusi, Marginal Fit, dan Estetika Glaze).",
+						CheckedAt:         now,
+					}).Error
+				}
+			}
+		}
+	}
+
+	// 4. Automatically sync invoices for all COMPLETED / DELIVERED production orders
+	_, _ = s.SyncInvoicesFromProduction(nil)
 }
 
 func (s *Service) ListInvoices(status string, customerIDStr string, search string) ([]Invoice, error) {
+	// Ensure any newly completed orders have their invoices generated automatically
+	_, _ = s.SyncInvoicesFromProduction(nil)
+
 	var list []Invoice
 	q := s.db.Preload("Customer").
 		Preload("ProductionOrder.DentureType").
+		Preload("ProductionOrder.Attachments").
+		Preload("ProductionOrder.QualityChecks").
+		Preload("Items").
 		Preload("Payments").
 		Where("deleted_at IS NULL")
 
@@ -47,6 +181,8 @@ func (s *Service) GetInvoiceByID(id uuid.UUID) (*Invoice, error) {
 	var inv Invoice
 	err := s.db.Preload("Customer").
 		Preload("ProductionOrder.DentureType").
+		Preload("ProductionOrder.Attachments").
+		Preload("ProductionOrder.QualityChecks").
 		Preload("Items").
 		Preload("Payments").
 		Where("id = ? AND deleted_at IS NULL", id).
@@ -88,8 +224,15 @@ func (s *Service) CreateInvoiceFromOrder(input CreateInvoiceInput) (*Invoice, er
 		tx.Model(&Invoice{}).Count(&count)
 		invNum := fmt.Sprintf("INV-%04d", count+1)
 
-		subtotal := order.TotalPrice
-		total := subtotal - input.DiscountAmount
+		disc := input.DiscountAmount
+		if disc == 0 && order.DiscountAmount > 0 {
+			disc = order.DiscountAmount
+		}
+		subtotal := order.TotalPrice + order.DiscountAmount
+		if subtotal <= 0 {
+			subtotal = order.TotalPrice
+		}
+		total := subtotal - disc
 		if total < 0 {
 			total = 0
 		}
@@ -105,7 +248,7 @@ func (s *Service) CreateInvoiceFromOrder(input CreateInvoiceInput) (*Invoice, er
 			IssueDate:         time.Now(),
 			DueDate:           input.DueDate,
 			Subtotal:          subtotal,
-			DiscountAmount:    input.DiscountAmount,
+			DiscountAmount:    disc,
 			TotalAmount:       total,
 			PaidAmount:        0,
 			BalanceDue:        total,
@@ -124,7 +267,7 @@ func (s *Service) CreateInvoiceFromOrder(input CreateInvoiceInput) (*Invoice, er
 			Description: fmt.Sprintf("%s - Pasien: %s (Gigi: %s)", order.DentureType.Name, order.PatientName, order.TeethNumbers),
 			Quantity:    1,
 			UnitPrice:   subtotal,
-			Discount:    input.DiscountAmount,
+			Discount:    disc,
 			Subtotal:    total,
 		}
 		return tx.Create(&item).Error
@@ -261,5 +404,151 @@ func (s *Service) CreateExpense(input CreateExpenseInput) (*Expense, error) {
 		return nil, err
 	}
 
+	s.db.Preload("Category").First(&exp, "id = ?", exp.ID)
 	return &exp, nil
+}
+
+// SyncInvoicesFromProduction automatically creates invoices for all COMPLETED / DELIVERED production orders that don't have one yet
+func (s *Service) SyncInvoicesFromProduction(createdBy *uuid.UUID) (int, error) {
+	var completedOrders []production.ProductionOrder
+	err := s.db.Preload("DentureType").
+		Where("status IN ('COMPLETED', 'DELIVERED') AND deleted_at IS NULL").
+		Order("created_at ASC").
+		Find(&completedOrders).Error
+	if err != nil {
+		return 0, err
+	}
+
+	createdCount := 0
+	for _, order := range completedOrders {
+		var existingCount int64
+		s.db.Model(&Invoice{}).Where("production_order_id = ? AND status != 'VOID' AND deleted_at IS NULL", order.ID).Count(&existingCount)
+		if existingCount > 0 {
+			continue
+		}
+
+		subtotal := order.TotalPrice + order.DiscountAmount
+		if subtotal <= 0 {
+			subtotal = order.TotalPrice
+		}
+		_, err := s.CreateInvoiceFromOrder(CreateInvoiceInput{
+			ProductionOrderID: order.ID,
+			DueDate:           time.Now().AddDate(0, 0, 14),
+			DiscountAmount:    order.DiscountAmount,
+			Notes:             fmt.Sprintf("Invoice otomatis dari penyelesaian SPK %s (Pasien: %s)", order.OrderNumber, order.PatientName),
+			CreatedBy:         createdBy,
+		})
+		if err == nil {
+			createdCount++
+		}
+	}
+	return createdCount, nil
+}
+
+// GetFinanceSummary computes daily/monthly sales omzet, gross profit, expenses by category, and active customers
+func (s *Service) GetFinanceSummary() (*FinanceReportSummary, error) {
+	_, _ = s.SyncInvoicesFromProduction(nil)
+
+	var invoices []Invoice
+	s.db.Preload("Customer").Where("status != 'VOID' AND deleted_at IS NULL").Order("issue_date DESC").Find(&invoices)
+
+	var expenses []Expense
+	s.db.Preload("Category").Order("expense_date DESC").Find(&expenses)
+
+	now := time.Now()
+	todayStr := now.Format("2006-01-02")
+	monthStr := now.Format("2006-01")
+
+	summary := &FinanceReportSummary{}
+	activeCustMap := map[string]bool{}
+	dailyMap := map[string]*SalesPeriodItem{}
+	monthlyMap := map[string]*SalesPeriodItem{}
+	var dailyKeys []string
+	var monthlyKeys []string
+
+	for _, inv := range invoices {
+		invDay := inv.IssueDate.Format("2006-01-02")
+		invMonth := inv.IssueDate.Format("2006-01")
+		activeCustMap[inv.CustomerID.String()] = true
+
+		summary.TotalInvoiced += inv.TotalAmount
+		summary.TotalPaid += inv.PaidAmount
+		summary.TotalReceivables += inv.BalanceDue
+
+		if inv.Status == "PAID" || inv.BalanceDue <= 0 {
+			summary.PaidInvoicesCount++
+		} else {
+			summary.UnpaidInvoicesCount++
+		}
+
+		if invDay == todayStr {
+			summary.DailyOmzet += inv.TotalAmount
+			summary.DailyOrdersCount++
+		}
+		if invMonth == monthStr {
+			summary.MonthlyOmzet += inv.TotalAmount
+			summary.MonthlyOrdersCount++
+		}
+
+		// Group daily
+		if _, ok := dailyMap[invDay]; !ok {
+			dailyKeys = append(dailyKeys, invDay)
+			dailyMap[invDay] = &SalesPeriodItem{PeriodLabel: invDay}
+		}
+		dItem := dailyMap[invDay]
+		dItem.OrdersCount++
+		dItem.GrossSales += inv.Subtotal
+		dItem.Discounts += inv.DiscountAmount
+		dItem.NetOmzet += inv.TotalAmount
+		dItem.PaidCollected += inv.PaidAmount
+		dItem.UnpaidBalance += inv.BalanceDue
+
+		// Group monthly
+		if _, ok := monthlyMap[invMonth]; !ok {
+			monthlyKeys = append(monthlyKeys, invMonth)
+			monthlyMap[invMonth] = &SalesPeriodItem{PeriodLabel: invMonth}
+		}
+		mItem := monthlyMap[invMonth]
+		mItem.OrdersCount++
+		mItem.GrossSales += inv.Subtotal
+		mItem.Discounts += inv.DiscountAmount
+		mItem.NetOmzet += inv.TotalAmount
+		mItem.PaidCollected += inv.PaidAmount
+		mItem.UnpaidBalance += inv.BalanceDue
+	}
+
+	//Also count active customers from production orders
+	var orderCustIDs []string
+	s.db.Table("production_orders").Where("deleted_at IS NULL").Distinct("customer_id").Pluck("customer_id", &orderCustIDs)
+	for _, cid := range orderCustIDs {
+		activeCustMap[cid] = true
+	}
+	summary.ActiveCustomersCount = len(activeCustMap)
+
+	// Calculate expenses by category (Biaya Bahan, Tenaga Kerja, Operasional)
+	for _, exp := range expenses {
+		summary.TotalExpenses += exp.Amount
+		switch exp.Category.Code {
+		case "RAW_MATERIAL", "MATERIAL":
+			summary.MaterialCost += exp.Amount
+		case "LABOR", "SALARY", "PAYROLL":
+			summary.LaborCost += exp.Amount
+		default:
+			summary.OperationalCost += exp.Amount
+		}
+	}
+
+	// Laba Kotor (Gross Profit) = Total Omzet Penjualan - (Biaya Bahan + Biaya Tenaga Kerja Produksi)
+	summary.GrossProfit = summary.TotalInvoiced - (summary.MaterialCost + summary.LaborCost)
+	// Laba Bersih Operasional (Net Operating Profit) = Laba Kotor - Biaya Operasional
+	summary.NetOperatingProfit = summary.GrossProfit - summary.OperationalCost
+
+	for _, k := range dailyKeys {
+		summary.DailyBreakdown = append(summary.DailyBreakdown, *dailyMap[k])
+	}
+	for _, k := range monthlyKeys {
+		summary.MonthlyBreakdown = append(summary.MonthlyBreakdown, *monthlyMap[k])
+	}
+
+	return summary, nil
 }

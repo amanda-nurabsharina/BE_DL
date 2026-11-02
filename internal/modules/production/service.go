@@ -559,7 +559,48 @@ func (s *Service) UpdateOrderStatus(orderID uuid.UUID, status string, internalNo
 	if err := s.db.Model(&ProductionOrder{}).Where("id = ?", orderID).Updates(updates).Error; err != nil {
 		return nil, err
 	}
+	if status == "COMPLETED" || status == "DELIVERED" {
+		s.autoCreateInvoiceIfNeeded(s.db, orderID)
+	}
 	return s.GetOrderByID(orderID)
+}
+
+func (s *Service) autoCreateInvoiceIfNeeded(tx *gorm.DB, orderID uuid.UUID) {
+	var existingCount int64
+	tx.Table("invoices").Where("production_order_id = ? AND status != 'VOID' AND deleted_at IS NULL", orderID).Count(&existingCount)
+	if existingCount > 0 {
+		return
+	}
+
+	var order ProductionOrder
+	if err := tx.Preload("DentureType").Where("id = ?", orderID).First(&order).Error; err != nil {
+		return
+	}
+
+	var totalCount int64
+	tx.Table("invoices").Count(&totalCount)
+	invNum := fmt.Sprintf("INV-%04d", totalCount+1)
+	now := time.Now()
+	dueDate := now.AddDate(0, 0, 14)
+
+	subtotal := order.TotalPrice + order.DiscountAmount
+	if subtotal <= 0 {
+		subtotal = order.TotalPrice
+	}
+	total := order.TotalPrice
+	invID := uuid.New()
+
+	_ = tx.Exec(`
+		INSERT INTO invoices (id, invoice_number, production_order_id, customer_id, issue_date, due_date, subtotal, discount_amount, total_amount, paid_amount, balance_due, status, notes, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'UNPAID', ?, ?, ?)
+	`, invID, invNum, order.ID, order.CustomerID, now, dueDate, subtotal, order.DiscountAmount, total, total,
+		fmt.Sprintf("Invoice otomatis dari penyelesaian SPK %s (Pasien: %s)", order.OrderNumber, order.PatientName), now, now).Error
+
+	desc := fmt.Sprintf("%s - Pasien: %s (Elemen Gigi: %s, Shade: %s)", order.DentureType.Name, order.PatientName, order.TeethNumbers, order.ShadeGuide)
+	_ = tx.Exec(`
+		INSERT INTO invoice_items (id, invoice_id, description, quantity, unit_price, discount, subtotal)
+		VALUES (?, ?, ?, 1, ?, ?, ?)
+	`, uuid.New(), invID, desc, subtotal, order.DiscountAmount, total).Error
 }
 
 func (s *Service) AdvanceStage(orderID uuid.UUID, currentRunID uuid.UUID, notes string, techID *uuid.UUID, nextTechID *uuid.UUID) error {
@@ -652,13 +693,17 @@ func (s *Service) SubmitQualityCheck(orderID uuid.UUID, inspectorID uuid.UUID, p
 
 		if passed {
 			// Passed QC -> COMPLETED (Now ready for invoicing & delivery!)
-			return tx.Model(&ProductionOrder{}).Where("id = ?", orderID).Updates(map[string]interface{}{
+			if err := tx.Model(&ProductionOrder{}).Where("id = ?", orderID).Updates(map[string]interface{}{
 				"status":             "COMPLETED",
 				"current_stage_code": "QC_PASSED",
 				"current_stage_name": "Lolos QC (Selesai Produksi)",
 				"completed_at":       &now,
 				"updated_at":         now,
-			}).Error
+			}).Error; err != nil {
+				return err
+			}
+			s.autoCreateInvoiceIfNeeded(tx, orderID)
+			return nil
 		}
 
 		// Failed QC -> Reopen for rework!
