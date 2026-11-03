@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"dental-lab-backend/internal/modules/finance"
@@ -155,33 +156,44 @@ type DashboardSummary struct {
 	AutoAlerts            []SystemAlert                `json:"auto_alerts"`
 }
 
-func (s *Service) GetDashboardSummary() (*DashboardSummary, error) {
+func (s *Service) GetDashboardSummary(tenantID *uuid.UUID) (*DashboardSummary, error) {
 	var summary DashboardSummary
 
 	// Active orders
-	s.db.Model(&production.ProductionOrder{}).
-		Where("status IN ('INTAKE', 'IN_PRODUCTION', 'REOPENED_FOR_REWORK') AND deleted_at IS NULL").
-		Count(&summary.ActiveOrdersCount)
+	actQ := s.db.Model(&production.ProductionOrder{}).
+		Where("status IN ('INTAKE', 'IN_PRODUCTION', 'REOPENED_FOR_REWORK') AND deleted_at IS NULL")
+	if tenantID != nil {
+		actQ = actQ.Where("tenant_id = ?", *tenantID)
+	}
+	actQ.Count(&summary.ActiveOrdersCount)
 
 	// QC Pending
-	s.db.Model(&production.ProductionOrder{}).
-		Where("status = 'QC_PENDING' AND deleted_at IS NULL").
-		Count(&summary.QCPendingCount)
+	qcQ := s.db.Model(&production.ProductionOrder{}).
+		Where("status = 'QC_PENDING' AND deleted_at IS NULL")
+	if tenantID != nil {
+		qcQ = qcQ.Where("tenant_id = ?", *tenantID)
+	}
+	qcQ.Count(&summary.QCPendingCount)
 
 	// Completed this month
 	now := time.Now()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 
-	s.db.Model(&production.ProductionOrder{}).
-		Where("(completed_at >= ? OR status IN ('COMPLETED', 'DELIVERED')) AND deleted_at IS NULL", startOfMonth).
-		Count(&summary.CompletedThisMonth)
+	compQ := s.db.Model(&production.ProductionOrder{}).
+		Where("(completed_at >= ? OR status IN ('COMPLETED', 'DELIVERED')) AND deleted_at IS NULL", startOfMonth)
+	if tenantID != nil {
+		compQ = compQ.Where("tenant_id = ?", *tenantID)
+	}
+	compQ.Count(&summary.CompletedThisMonth)
 
 	// All orders for charts, top customer, top product, and late alerts
 	var allOrders []production.ProductionOrder
-	s.db.Preload("Customer").Preload("DentureType").
-		Where("deleted_at IS NULL").
-		Order("created_at DESC").
-		Find(&allOrders)
+	ordersQ := s.db.Preload("Customer").Preload("DentureType").
+		Where("deleted_at IS NULL")
+	if tenantID != nil {
+		ordersQ = ordersQ.Where("tenant_id = ?", *tenantID)
+	}
+	ordersQ.Order("created_at DESC").Find(&allOrders)
 
 	// Recent 5 orders
 	if len(allOrders) > 5 {
@@ -192,12 +204,19 @@ func (s *Service) GetDashboardSummary() (*DashboardSummary, error) {
 
 	// Invoices & Expenses for Cost vs Revenue Analysis
 	var allInvoices []finance.Invoice
-	s.db.Preload("Customer").Preload("ProductionOrder").
-		Where("status != 'VOID' AND deleted_at IS NULL").
-		Find(&allInvoices)
+	invQ := s.db.Preload("Customer").Preload("ProductionOrder").
+		Where("status != 'VOID' AND deleted_at IS NULL")
+	if tenantID != nil {
+		invQ = invQ.Where("tenant_id = ?", *tenantID)
+	}
+	invQ.Find(&allInvoices)
 
 	var allExpenses []finance.Expense
-	s.db.Preload("Category").Find(&allExpenses)
+	expQ := s.db.Preload("Category")
+	if tenantID != nil {
+		expQ = expQ.Where("tenant_id = ?", *tenantID)
+	}
+	expQ.Find(&allExpenses)
 
 	var invoicedTotal, paidTotal, receivablesTotal float64
 	for _, inv := range allInvoices {
@@ -415,9 +434,12 @@ func (s *Service) GetDashboardSummary() (*DashboardSummary, error) {
 
 	// (b) Stok Menipis (current_stock <= min_stock_level)
 	var lowStockItems []inventory.Item
-	s.db.Preload("Unit").
-		Where("current_stock <= min_stock_level AND deleted_at IS NULL").
-		Find(&lowStockItems)
+	stockQ := s.db.Preload("Unit").
+		Where("current_stock <= min_stock_level AND deleted_at IS NULL")
+	if tenantID != nil {
+		stockQ = stockQ.Where("tenant_id = ?", *tenantID)
+	}
+	stockQ.Find(&lowStockItems)
 	summary.LowStockCount = int64(len(lowStockItems))
 
 	for _, itm := range lowStockItems {

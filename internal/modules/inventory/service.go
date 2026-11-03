@@ -352,9 +352,13 @@ func (s *Service) ListUnits() ([]UnitOfMeasure, error) {
 }
 
 // Suppliers
-func (s *Service) ListSuppliers() ([]Supplier, error) {
+func (s *Service) ListSuppliers(tenantID *uuid.UUID) ([]Supplier, error) {
 	var suppliers []Supplier
-	err := s.db.Where("deleted_at IS NULL").Order("name ASC").Find(&suppliers).Error
+	q := s.db.Where("deleted_at IS NULL")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
+	err := q.Order("name ASC").Find(&suppliers).Error
 	return suppliers, err
 }
 
@@ -373,23 +377,27 @@ func (s *Service) CreateSupplier(sup *Supplier) error {
 
 // Items
 type UpsertItemInput struct {
-	Code          string  `json:"code"`
-	Name          string  `json:"name"`
-	Category      string  `json:"category"`
-	UnitID        int     `json:"unit_id"`
-	SupplierID    string  `json:"supplier_id"`
-	MinStockLevel float64 `json:"min_stock_level"`
-	CurrentStock  float64 `json:"current_stock"`
-	PurchasePrice float64 `json:"purchase_price"`
-	LotNumber     string  `json:"lot_number"`
-	ExpiryDate    string  `json:"expiry_date"`
-	Description   string  `json:"description"`
-	UserID        uuid.UUID `json:"-"`
+	TenantID      *uuid.UUID `json:"tenant_id"`
+	Code          string     `json:"code"`
+	Name          string     `json:"name"`
+	Category      string     `json:"category"`
+	UnitID        int        `json:"unit_id"`
+	SupplierID    string     `json:"supplier_id"`
+	MinStockLevel float64    `json:"min_stock_level"`
+	CurrentStock  float64    `json:"current_stock"`
+	PurchasePrice float64    `json:"purchase_price"`
+	LotNumber     string     `json:"lot_number"`
+	ExpiryDate    string     `json:"expiry_date"`
+	Description   string     `json:"description"`
+	UserID        uuid.UUID  `json:"-"`
 }
 
-func (s *Service) ListItems(search string, category string) ([]Item, error) {
+func (s *Service) ListItems(search string, category string, tenantID *uuid.UUID) ([]Item, error) {
 	var items []Item
 	q := s.db.Preload("Unit").Preload("Supplier").Where("deleted_at IS NULL")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
 	if search != "" {
 		likeTerm := "%" + search + "%"
 		q = q.Where("name ILIKE ? OR code ILIKE ? OR lot_number ILIKE ?", likeTerm, likeTerm, likeTerm)
@@ -433,6 +441,7 @@ func (s *Service) CreateItem(input UpsertItemInput) (*Item, error) {
 	expPtr := parseFlexibleDate(input.ExpiryDate)
 
 	item := Item{
+		TenantID:      input.TenantID,
 		Code:          code,
 		Name:          input.Name,
 		Category:      cat,
@@ -776,9 +785,13 @@ func (s *Service) ListMovements(itemID string, movementType string) ([]StockMove
 	return movements, err
 }
 
-func (s *Service) GetInventoryReport() (*InventoryReportSummary, error) {
+func (s *Service) GetInventoryReport(tenantID *uuid.UUID) (*InventoryReportSummary, error) {
 	var items []Item
-	if err := s.db.Preload("Unit").Preload("Supplier").Where("deleted_at IS NULL").Order("current_stock ASC").Find(&items).Error; err != nil {
+	q := s.db.Preload("Unit").Preload("Supplier").Where("deleted_at IS NULL")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
+	if err := q.Order("current_stock ASC").Find(&items).Error; err != nil {
 		return nil, err
 	}
 
@@ -801,7 +814,11 @@ func (s *Service) GetInventoryReport() (*InventoryReportSummary, error) {
 
 	// Count expiring soon / expired from active batches (or items)
 	var batches []InventoryBatch
-	s.db.Where("current_quantity > 0 AND expiry_date IS NOT NULL").Find(&batches)
+	bQuery := s.db.Where("current_quantity > 0 AND expiry_date IS NOT NULL")
+	if tenantID != nil {
+		bQuery = bQuery.Joins("JOIN items i ON i.id = inventory_batches.item_id AND i.tenant_id = ?", *tenantID)
+	}
+	bQuery.Find(&batches)
 	for _, b := range batches {
 		if b.ExpiryDate != nil {
 			if b.ExpiryDate.Before(now) {
@@ -824,12 +841,15 @@ func (s *Service) GetInventoryReport() (*InventoryReportSummary, error) {
 		TotalValue float64
 	}
 	var rows []usageRow
-	s.db.Table("stock_movements sm").
+	smQuery := s.db.Table("stock_movements sm").
 		Select("sm.item_id, i.code as item_code, i.name as item_name, i.category, u.code as unit_code, SUM(ABS(sm.quantity)) as total_used, COUNT(sm.id) as usage_count, SUM(ABS(sm.quantity) * sm.unit_cost) as total_value").
 		Joins("JOIN items i ON i.id = sm.item_id").
 		Joins("LEFT JOIN units_of_measure u ON u.id = i.unit_id").
-		Where("sm.quantity < 0 AND i.deleted_at IS NULL").
-		Group("sm.item_id, i.code, i.name, i.category, u.code").
+		Where("sm.quantity < 0 AND i.deleted_at IS NULL")
+	if tenantID != nil {
+		smQuery = smQuery.Where("i.tenant_id = ?", *tenantID)
+	}
+	smQuery.Group("sm.item_id, i.code, i.name, i.category, u.code").
 		Order("total_used DESC, usage_count DESC").
 		Limit(10).
 		Scan(&rows)
@@ -851,9 +871,12 @@ func (s *Service) GetInventoryReport() (*InventoryReportSummary, error) {
 }
 
 // Purchase Requests with Owner Approval
-func (s *Service) ListPurchaseRequests(status string) ([]PurchaseRequest, error) {
+func (s *Service) ListPurchaseRequests(status string, tenantID *uuid.UUID) ([]PurchaseRequest, error) {
 	var prs []PurchaseRequest
 	q := s.db.Preload("Supplier").Preload("Items.Item.Unit")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}

@@ -7,6 +7,25 @@ import (
 	"gorm.io/gorm"
 )
 
+type Tenant struct {
+	ID        uuid.UUID      `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	Code      string         `gorm:"uniqueIndex;not null;size:50" json:"code"`
+	Name      string         `gorm:"not null;size:150" json:"name"`
+	Address   string         `json:"address"`
+	Phone     string         `json:"phone"`
+	Email     string         `json:"email"`
+	IsActive  bool           `gorm:"default:true" json:"is_active"`
+	UserCount int64          `gorm:"-" json:"user_count"`
+	OrderCount int64         `gorm:"-" json:"order_count"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (Tenant) TableName() string {
+	return "tenants"
+}
+
 type Role struct {
 	ID           int       `gorm:"primaryKey" json:"id"`
 	Name         string    `json:"name"`
@@ -36,6 +55,8 @@ type User struct {
 	Bio            string         `json:"bio"`
 	RoleID         int            `json:"role_id"`
 	Role           Role           `gorm:"foreignKey:RoleID" json:"role"`
+	TenantID       *uuid.UUID     `gorm:"type:uuid" json:"tenant_id"`
+	Tenant         *Tenant        `gorm:"foreignKey:TenantID" json:"tenant,omitempty"`
 	IsActive       bool           `json:"is_active"`
 	// Computed HR & Production KPI fields
 	ActiveOrdersCount     int     `gorm:"-" json:"active_orders_count"`
@@ -85,17 +106,51 @@ func (SystemSetting) TableName() string {
 }
 
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	TenantCode string `json:"tenant_code,omitempty"`
 }
 
 type LoginResponse struct {
-	Token     string `json:"token"`
-	ExpiresIn string `json:"expires_in"`
-	User      User   `json:"user"`
+	Token     string  `json:"token"`
+	ExpiresIn string  `json:"expires_in"`
+	User      User    `json:"user"`
+	Tenant    *Tenant `json:"tenant,omitempty"`
+}
+
+type CreateTenantRequest struct {
+	Code          string `json:"code"`
+	Name          string `json:"name"`
+	Address       string `json:"address"`
+	Phone         string `json:"phone"`
+	Email         string `json:"email"`
+	AdminUsername string `json:"admin_username,omitempty"`
+	AdminPassword string `json:"admin_password,omitempty"`
+	AdminFullName string `json:"admin_full_name,omitempty"`
+}
+
+type UpdateTenantRequest struct {
+	Name     *string `json:"name"`
+	Address  *string `json:"address"`
+	Phone    *string `json:"phone"`
+	Email    *string `json:"email"`
+	IsActive *bool   `json:"is_active"`
+}
+
+type CreateRoleRequest struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	AllowedMenus string `json:"allowed_menus"`
+}
+
+type UpdateRoleRequest struct {
+	Name         *string `json:"name"`
+	Description  *string `json:"description"`
+	AllowedMenus *string `json:"allowed_menus"`
 }
 
 type CreateUserRequest struct {
+	TenantID       string `json:"tenant_id"`
 	Username       string `json:"username"`
 	Password       string `json:"password"`
 	FullName       string `json:"full_name"`
@@ -111,6 +166,7 @@ type CreateUserRequest struct {
 }
 
 type UpdateUserRequest struct {
+	TenantID       *string `json:"tenant_id"`
 	FullName       *string `json:"full_name"`
 	Email          *string `json:"email"`
 	Phone          *string `json:"phone"`

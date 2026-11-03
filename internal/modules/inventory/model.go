@@ -19,6 +19,7 @@ func (UnitOfMeasure) TableName() string {
 
 type Supplier struct {
 	ID            uuid.UUID      `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID      *uuid.UUID     `gorm:"type:uuid;index" json:"tenant_id"`
 	Code          string         `gorm:"uniqueIndex;not null" json:"code"`
 	Name          string         `gorm:"not null" json:"name"`
 	ContactPerson string         `json:"contact_person"`
@@ -37,6 +38,7 @@ func (Supplier) TableName() string {
 
 type Item struct {
 	ID            uuid.UUID      `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID      *uuid.UUID     `gorm:"type:uuid;index" json:"tenant_id"`
 	Code          string         `gorm:"uniqueIndex;not null" json:"code"`
 	Name          string         `gorm:"not null" json:"name"`
 	Category      string         `gorm:"default:'RAW_MATERIAL'" json:"category"` // RAW_MATERIAL, PRODUCT, CONSUMABLE, TOOL
@@ -101,6 +103,7 @@ func (StockMovement) TableName() string {
 // Purchase Request with Owner Approval
 type PurchaseRequest struct {
 	ID              uuid.UUID             `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID        *uuid.UUID            `gorm:"type:uuid;index" json:"tenant_id"`
 	PRNumber        string                `gorm:"uniqueIndex;not null" json:"pr_number"`
 	SupplierID      *uuid.UUID            `json:"supplier_id"`
 	Supplier        *Supplier             `gorm:"foreignKey:SupplierID" json:"supplier"`

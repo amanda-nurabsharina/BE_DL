@@ -234,7 +234,7 @@ func (s *Service) ListDentureTypes() ([]DentureType, error) {
 	return list, err
 }
 
-func (s *Service) ListOrders(status, customerIDStr, search string) ([]ProductionOrder, error) {
+func (s *Service) ListOrders(status, customerIDStr, search string, tenantID *uuid.UUID) ([]ProductionOrder, error) {
 	var list []ProductionOrder
 	q := s.db.Preload("Customer").
 		Preload("Patient").
@@ -253,6 +253,9 @@ func (s *Service) ListOrders(status, customerIDStr, search string) ([]Production
 		}).
 		Where("deleted_at IS NULL")
 
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
@@ -297,6 +300,7 @@ func (s *Service) GetOrderByID(id uuid.UUID) (*ProductionOrder, error) {
 }
 
 type CreateOrderInput struct {
+	TenantID        *uuid.UUID `json:"tenant_id"`
 	CustomerID      uuid.UUID  `json:"customer_id"`
 	PatientID       *uuid.UUID `json:"patient_id"`
 	PatientName     string     `json:"patient_name"`
@@ -378,6 +382,7 @@ func (s *Service) CreateOrder(input CreateOrderInput) (*ProductionOrder, error) 
 				var patCount int64
 				tx.Unscoped().Model(&customers.Patient{}).Count(&patCount)
 				newPat := customers.Patient{
+					TenantID:         input.TenantID,
 					Code:             fmt.Sprintf("PAS-%04d", patCount+1),
 					CustomerID:       &input.CustomerID,
 					Name:             input.PatientName,
@@ -401,6 +406,7 @@ func (s *Service) CreateOrder(input CreateOrderInput) (*ProductionOrder, error) 
 		}
 
 		order = ProductionOrder{
+			TenantID:            input.TenantID,
 			OrderNumber:         orderNumber,
 			CustomerID:          input.CustomerID,
 			PatientID:           patientID,

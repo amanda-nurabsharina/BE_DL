@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 
 	"dental-lab-backend/internal/platform/middleware"
 )
@@ -101,8 +102,23 @@ func (h *Handler) AuditTrailMiddleware(jwtSecret string) fiber.Handler {
 	}
 }
 
+func getTenantID(c *fiber.Ctx) *uuid.UUID {
+	role, _ := c.Locals("role").(string)
+	if role == "SUPER_ADMIN" {
+		if tQuery := c.Query("tenant_id"); tQuery != "" {
+			if parsed, err := uuid.Parse(tQuery); err == nil {
+				return &parsed
+			}
+		}
+	}
+	if tid, ok := c.Locals("tenant_id").(*uuid.UUID); ok {
+		return tid
+	}
+	return nil
+}
+
 func (h *Handler) GetDashboardSummary(c *fiber.Ctx) error {
-	summary, err := h.service.GetDashboardSummary()
+	summary, err := h.service.GetDashboardSummary(getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

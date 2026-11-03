@@ -9,6 +9,7 @@ import (
 
 type Customer struct {
 	ID                  uuid.UUID      `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID            *uuid.UUID     `gorm:"type:uuid" json:"tenant_id"`
 	Code                string         `gorm:"uniqueIndex;not null" json:"code"`
 	Name                string         `gorm:"not null" json:"name"` // Doctor name
 	ClinicName          string         `json:"clinic_name"`
@@ -38,6 +39,7 @@ func (Customer) TableName() string {
 
 type Patient struct {
 	ID               uuid.UUID      `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID         *uuid.UUID     `gorm:"type:uuid" json:"tenant_id"`
 	Code             string         `gorm:"uniqueIndex;not null" json:"code"`
 	CustomerID       *uuid.UUID     `json:"customer_id"`
 	Customer         *Customer      `gorm:"foreignKey:CustomerID" json:"customer"`
@@ -61,6 +63,7 @@ func (Patient) TableName() string {
 }
 
 type CreateCustomerRequest struct {
+	TenantID            string  `json:"tenant_id"`
 	Name                string  `json:"name"`
 	ClinicName          string  `json:"clinic_name"`
 	Phone               string  `json:"phone"`
@@ -90,6 +93,7 @@ type UpdateCustomerRequest struct {
 }
 
 type CreatePatientRequest struct {
+	TenantID         string `json:"tenant_id"`
 	CustomerID       string `json:"customer_id"`
 	Name             string `json:"name"`
 	Gender           string `json:"gender"`

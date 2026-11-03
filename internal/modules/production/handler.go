@@ -49,7 +49,21 @@ func (h *Handler) ListOrders(c *fiber.Ctx) error {
 	customerID := c.Query("customer_id")
 	search := c.Query("search")
 
-	orders, err := h.service.ListOrders(status, customerID, search)
+	var tenantID *uuid.UUID
+	role, _ := c.Locals("role").(string)
+	if role == "SUPER_ADMIN" {
+		if tQuery := c.Query("tenant_id"); tQuery != "" {
+			if parsed, err := uuid.Parse(tQuery); err == nil {
+				tenantID = &parsed
+			}
+		}
+	} else {
+		if tid, ok := c.Locals("tenant_id").(*uuid.UUID); ok {
+			tenantID = tid
+		}
+	}
+
+	orders, err := h.service.ListOrders(status, customerID, search, tenantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -74,6 +88,24 @@ func (h *Handler) CreateOrder(c *fiber.Ctx) error {
 	if err := c.BodyParser(&input); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
 	}
+
+	var tenantID *uuid.UUID
+	role, _ := c.Locals("role").(string)
+	if role == "SUPER_ADMIN" {
+		if input.TenantID != nil {
+			tenantID = input.TenantID
+		} else if tQuery := c.Query("tenant_id"); tQuery != "" {
+			if parsed, err := uuid.Parse(tQuery); err == nil {
+				tenantID = &parsed
+			}
+		}
+	}
+	if tenantID == nil {
+		if tid, ok := c.Locals("tenant_id").(*uuid.UUID); ok {
+			tenantID = tid
+		}
+	}
+	input.TenantID = tenantID
 
 	userIDStr, _ := c.Locals("user_id").(string)
 	if uid, err := uuid.Parse(userIDStr); err == nil {

@@ -358,9 +358,14 @@ func (s *Service) enrichCustomers(list []Customer) []Customer {
 	return list
 }
 
-func (s *Service) List(search string) ([]Customer, error) {
+func (s *Service) List(search string, tenantID ...string) ([]Customer, error) {
 	var list []Customer
 	query := s.db.Where("deleted_at IS NULL")
+	if len(tenantID) > 0 && tenantID[0] != "" {
+		if tid, err := uuid.Parse(tenantID[0]); err == nil {
+			query = query.Where("tenant_id = ?", tid)
+		}
+	}
 	if search != "" {
 		likeTerm := "%" + search + "%"
 		query = query.Where("name ILIKE ? OR clinic_name ILIKE ? OR phone ILIKE ? OR code ILIKE ?", likeTerm, likeTerm, likeTerm, likeTerm)
@@ -387,6 +392,19 @@ func (s *Service) Create(req CreateCustomerRequest) (*Customer, error) {
 	s.db.Unscoped().Model(&Customer{}).Count(&count)
 	code := fmt.Sprintf("DOC-%04d", count+1)
 
+	var tenantID *uuid.UUID
+	if req.TenantID != "" {
+		if tid, err := uuid.Parse(req.TenantID); err == nil {
+			tenantID = &tid
+		}
+	}
+	if tenantID == nil {
+		var mainTenant struct{ ID uuid.UUID }
+		if err := s.db.Table("tenants").Where("code = 'main'").First(&mainTenant).Error; err == nil {
+			tenantID = &mainTenant.ID
+		}
+	}
+
 	pref := req.Preferences
 	if pref == "" {
 		pref = "{}"
@@ -397,6 +415,7 @@ func (s *Service) Create(req CreateCustomerRequest) (*Customer, error) {
 	}
 
 	c := Customer{
+		TenantID:            tenantID,
 		Code:                code,
 		Name:                req.Name,
 		ClinicName:          req.ClinicName,
@@ -482,9 +501,14 @@ type patientOrderAgg struct {
 	LastOrderDate *time.Time `gorm:"column:last_order_date"`
 }
 
-func (s *Service) ListPatients(search string, customerID string) ([]Patient, error) {
+func (s *Service) ListPatients(search string, customerID string, tenantID ...string) ([]Patient, error) {
 	var list []Patient
 	query := s.db.Preload("Customer").Where("deleted_at IS NULL")
+	if len(tenantID) > 0 && tenantID[0] != "" {
+		if tid, err := uuid.Parse(tenantID[0]); err == nil {
+			query = query.Where("tenant_id = ?", tid)
+		}
+	}
 	if customerID != "" {
 		if cid, err := uuid.Parse(customerID); err == nil {
 			query = query.Where("customer_id = ?", cid)
@@ -552,6 +576,19 @@ func (s *Service) CreatePatient(req CreatePatientRequest) (*Patient, error) {
 	s.db.Unscoped().Model(&Patient{}).Count(&count)
 	code := fmt.Sprintf("PAS-%04d", count+1)
 
+	var tenantID *uuid.UUID
+	if req.TenantID != "" {
+		if tid, err := uuid.Parse(req.TenantID); err == nil {
+			tenantID = &tid
+		}
+	}
+	if tenantID == nil {
+		var mainTenant struct{ ID uuid.UUID }
+		if err := s.db.Table("tenants").Where("code = 'main'").First(&mainTenant).Error; err == nil {
+			tenantID = &mainTenant.ID
+		}
+	}
+
 	var custUUID *uuid.UUID
 	if req.CustomerID != "" {
 		if parsed, err := uuid.Parse(req.CustomerID); err == nil {
@@ -569,6 +606,7 @@ func (s *Service) CreatePatient(req CreatePatientRequest) (*Patient, error) {
 	}
 
 	p := Patient{
+		TenantID:         tenantID,
 		Code:             code,
 		CustomerID:       custUUID,
 		Name:             req.Name,

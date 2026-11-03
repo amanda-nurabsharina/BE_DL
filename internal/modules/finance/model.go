@@ -12,6 +12,7 @@ import (
 
 type Invoice struct {
 	ID                uuid.UUID                   `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID          *uuid.UUID                  `gorm:"type:uuid;index" json:"tenant_id"`
 	InvoiceNumber     string                      `gorm:"uniqueIndex;not null" json:"invoice_number"`
 	ProductionOrderID *uuid.UUID                  `json:"production_order_id"`
 	ProductionOrder   *production.ProductionOrder `gorm:"foreignKey:ProductionOrderID" json:"production_order"`
@@ -54,6 +55,7 @@ func (InvoiceItem) TableName() string {
 
 type Payment struct {
 	ID              uuid.UUID  `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID        *uuid.UUID `gorm:"type:uuid;index" json:"tenant_id"`
 	PaymentNumber   string     `gorm:"uniqueIndex;not null" json:"payment_number"`
 	InvoiceID       *uuid.UUID `json:"invoice_id"`
 	CustomerID      uuid.UUID  `json:"customer_id"`
@@ -83,6 +85,7 @@ func (ExpenseCategory) TableName() string {
 
 type Expense struct {
 	ID            uuid.UUID       `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID      *uuid.UUID      `gorm:"type:uuid;index" json:"tenant_id"`
 	ExpenseNumber string          `gorm:"uniqueIndex;not null" json:"expense_number"`
 	CategoryID    int             `json:"category_id"`
 	Category      ExpenseCategory `gorm:"foreignKey:CategoryID" json:"category"`

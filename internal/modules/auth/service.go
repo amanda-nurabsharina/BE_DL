@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -21,8 +22,76 @@ type Service struct {
 
 func NewService(db *gorm.DB, jwtSecret string) *Service {
 	s := &Service{db: db, jwtSecret: jwtSecret}
+	s.ensureTenantsSchemaAndMigrate()
 	s.ensureHRSchemaAndSeed()
 	return s
+}
+
+func (s *Service) ensureTenantsSchemaAndMigrate() {
+	// 1. Create tenants table if not exists
+	_ = s.db.Exec(`CREATE TABLE IF NOT EXISTS tenants (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		code VARCHAR(50) UNIQUE NOT NULL,
+		name VARCHAR(150) NOT NULL,
+		address TEXT DEFAULT '',
+		phone VARCHAR(50) DEFAULT '',
+		email VARCHAR(100) DEFAULT '',
+		is_active BOOLEAN DEFAULT TRUE,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		deleted_at TIMESTAMP WITH TIME ZONE
+	)`).Error
+
+	// 2. Insert default main tenant if not exists
+	_ = s.db.Exec(`INSERT INTO tenants (code, name, address, phone, email, is_active)
+		VALUES ('main', 'Main Dental Lab (Pusat)', 'Jl. Kesehatan No. 10, Jakarta Selatan', '081122334455', 'main@dentallab.com', true)
+		ON CONFLICT (code) DO NOTHING`).Error
+
+	// 3. Add tenant_id to all relevant tables if not exists
+	tables := []string{
+		"users",
+		"customers",
+		"patients",
+		"production_orders",
+		"items",
+		"suppliers",
+		"purchase_requests",
+		"invoices",
+		"payments",
+		"expenses",
+		"staff_attendances",
+	}
+
+	for _, tbl := range tables {
+		_ = s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL`, tbl)).Error
+	}
+
+	// 4. Migrate existing data without tenant_id to the 'main' tenant
+	_ = s.db.Exec(`
+		DO $$
+		DECLARE
+			main_tid UUID;
+		BEGIN
+			SELECT id INTO main_tid FROM tenants WHERE code = 'main' LIMIT 1;
+			IF main_tid IS NOT NULL THEN
+				UPDATE users SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE customers SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE patients SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE production_orders SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE items SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE suppliers SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE purchase_requests SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE invoices SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE payments SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE expenses SET tenant_id = main_tid WHERE tenant_id IS NULL;
+				UPDATE staff_attendances SET tenant_id = main_tid WHERE tenant_id IS NULL;
+			END IF;
+		END $$;
+	`).Error
+
+	// 5. Allow users with the same username across different tenants
+	_ = s.db.Exec(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key`).Error
+	_ = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username) WHERE deleted_at IS NULL`).Error
 }
 
 func (s *Service) ensureHRSchemaAndSeed() {
@@ -314,7 +383,20 @@ func (s *Service) enrichUsersWithKPI(users []User) []User {
 
 func (s *Service) Login(req LoginRequest) (*LoginResponse, error) {
 	var user User
-	err := s.db.Preload("Role").Where("username = ? AND is_active = true", req.Username).First(&user).Error
+	q := s.db.Preload("Role").Preload("Tenant").Where("is_active = true AND deleted_at IS NULL")
+
+	if req.TenantCode != "" {
+		var tenant Tenant
+		if err := s.db.Where("code = ? AND deleted_at IS NULL", strings.ToLower(req.TenantCode)).First(&tenant).Error; err == nil {
+			q = q.Where("username = ? AND (tenant_id = ? OR role_id = (SELECT id FROM roles WHERE name = 'SUPER_ADMIN'))", req.Username, tenant.ID)
+		} else {
+			q = q.Where("username = ?", req.Username)
+		}
+	} else {
+		q = q.Where("username = ?", req.Username)
+	}
+
+	err := q.First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("invalid username or password")
@@ -329,11 +411,17 @@ func (s *Service) Login(req LoginRequest) (*LoginResponse, error) {
 	enriched := s.enrichUsersWithKPI([]User{user})
 	user = enriched[0]
 
+	tenantIDStr := ""
+	if user.TenantID != nil {
+		tenantIDStr = user.TenantID.String()
+	}
+
 	tokenTTL := 24 * time.Hour
 	claims := middleware.Claims{
 		UserID:   user.ID.String(),
 		Username: user.Username,
 		Role:     user.Role.Name,
+		TenantID: tenantIDStr,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(tokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -350,6 +438,7 @@ func (s *Service) Login(req LoginRequest) (*LoginResponse, error) {
 		Token:     tokenStr,
 		ExpiresIn: "24h",
 		User:      user,
+		Tenant:    user.Tenant,
 	}, nil
 }
 
@@ -360,7 +449,7 @@ func (s *Service) GetMe(userIDStr string) (*User, error) {
 	}
 
 	var user User
-	err = s.db.Preload("Role").Where("id = ?", uid).First(&user).Error
+	err = s.db.Preload("Role").Preload("Tenant").Where("id = ?", uid).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -369,9 +458,18 @@ func (s *Service) GetMe(userIDStr string) (*User, error) {
 }
 
 // User Management
-func (s *Service) ListUsers() ([]User, error) {
+func (s *Service) ListUsers(tenantFilter ...string) ([]User, error) {
 	var users []User
-	err := s.db.Preload("Role").Where("deleted_at IS NULL").Order("created_at ASC").Find(&users).Error
+	q := s.db.Preload("Role").Preload("Tenant").Where("deleted_at IS NULL")
+
+	if len(tenantFilter) > 0 && tenantFilter[0] != "" {
+		tid, err := uuid.Parse(tenantFilter[0])
+		if err == nil {
+			q = q.Where("tenant_id = ?", tid)
+		}
+	}
+
+	err := q.Order("created_at ASC").Find(&users).Error
 	if err != nil {
 		return nil, err
 	}
@@ -381,6 +479,31 @@ func (s *Service) ListUsers() ([]User, error) {
 func (s *Service) CreateUser(req CreateUserRequest) (*User, error) {
 	if req.Username == "" || req.Password == "" || req.FullName == "" || req.RoleID == 0 {
 		return nil, errors.New("username, password, full name, and role are required")
+	}
+
+	// Assign Tenant
+	var tenantID *uuid.UUID
+	if req.TenantID != "" {
+		tid, err := uuid.Parse(req.TenantID)
+		if err == nil {
+			tenantID = &tid
+		}
+	}
+	if tenantID == nil {
+		var mainTenant Tenant
+		if err := s.db.Where("code = 'main' AND deleted_at IS NULL").First(&mainTenant).Error; err == nil {
+			tenantID = &mainTenant.ID
+		}
+	}
+
+	// Check unique username within tenant
+	var existing User
+	q := s.db.Where("username = ? AND deleted_at IS NULL", req.Username)
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
+	if err := q.First(&existing).Error; err == nil {
+		return nil, errors.New("username sudah digunakan pada tenant ini")
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -402,6 +525,7 @@ func (s *Service) CreateUser(req CreateUserRequest) (*User, error) {
 	}
 
 	user := User{
+		TenantID:       tenantID,
 		EmployeeCode:   empCode,
 		Username:       req.Username,
 		Email:          req.Email,
@@ -431,6 +555,12 @@ func (s *Service) UpdateUser(userID uuid.UUID, req UpdateUserRequest) (*User, er
 		return nil, err
 	}
 
+	if req.TenantID != nil && *req.TenantID != "" {
+		tid, err := uuid.Parse(*req.TenantID)
+		if err == nil {
+			user.TenantID = &tid
+		}
+	}
 	if req.FullName != nil {
 		user.FullName = *req.FullName
 	}
@@ -494,11 +624,243 @@ func (s *Service) ListRoles() ([]Role, error) {
 	return roles, err
 }
 
+func (s *Service) CreateRole(req CreateRoleRequest) (*Role, error) {
+	name := strings.ToUpper(strings.TrimSpace(req.Name))
+	if name == "" {
+		return nil, errors.New("nama role wajib diisi")
+	}
+
+	var existing Role
+	if err := s.db.Where("name = ?", name).First(&existing).Error; err == nil {
+		return nil, errors.New("role dengan nama tersebut sudah ada")
+	}
+
+	menus := req.AllowedMenus
+	if menus == "" {
+		menus = "[]"
+	}
+
+	role := Role{
+		Name:         name,
+		Description:  req.Description,
+		AllowedMenus: menus,
+		CreatedAt:    time.Now(),
+	}
+
+	if err := s.db.Create(&role).Error; err != nil {
+		return nil, err
+	}
+
+	return &role, nil
+}
+
+func (s *Service) UpdateRole(roleID int, req UpdateRoleRequest) (*Role, error) {
+	var role Role
+	if err := s.db.First(&role, roleID).Error; err != nil {
+		return nil, errors.New("role tidak ditemukan")
+	}
+
+	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+		role.Name = strings.ToUpper(strings.TrimSpace(*req.Name))
+	}
+	if req.Description != nil {
+		role.Description = *req.Description
+	}
+	if req.AllowedMenus != nil {
+		role.AllowedMenus = *req.AllowedMenus
+	}
+
+	if err := s.db.Save(&role).Error; err != nil {
+		return nil, err
+	}
+
+	return &role, nil
+}
+
+func (s *Service) DeleteRole(roleID int) error {
+	var role Role
+	if err := s.db.First(&role, roleID).Error; err != nil {
+		return errors.New("role tidak ditemukan")
+	}
+
+	systemRoles := map[string]bool{
+		"SUPER_ADMIN": true,
+		"OWNER":       true,
+		"ADMIN":       true,
+		"TECHNICIAN":  true,
+		"CASHIER":     true,
+	}
+	if systemRoles[role.Name] {
+		return errors.New("role bawaan sistem tidak dapat dihapus")
+	}
+
+	var userCount int64
+	s.db.Model(&User{}).Where("role_id = ? AND deleted_at IS NULL", roleID).Count(&userCount)
+	if userCount > 0 {
+		return fmt.Errorf("role tidak dapat dihapus karena masih digunakan oleh %d pengguna", userCount)
+	}
+
+	return s.db.Delete(&role).Error
+}
+
 func (s *Service) UpdateRoleMenus(roleID int, allowedMenus string) error {
 	if allowedMenus == "" {
 		allowedMenus = "[]"
 	}
 	return s.db.Model(&Role{}).Where("id = ?", roleID).Update("allowed_menus", allowedMenus).Error
+}
+
+// Tenant Management (Multi-Tenant Setup)
+func (s *Service) ListTenants() ([]Tenant, error) {
+	var tenants []Tenant
+	if err := s.db.Where("deleted_at IS NULL").Order("created_at ASC").Find(&tenants).Error; err != nil {
+		return nil, err
+	}
+
+	for i := range tenants {
+		var uCount int64
+		var oCount int64
+		s.db.Model(&User{}).Where("tenant_id = ? AND deleted_at IS NULL", tenants[i].ID).Count(&uCount)
+		s.db.Table("production_orders").Where("tenant_id = ? AND deleted_at IS NULL", tenants[i].ID).Count(&oCount)
+		tenants[i].UserCount = uCount
+		tenants[i].OrderCount = oCount
+	}
+
+	return tenants, nil
+}
+
+func (s *Service) GetTenant(idStr string) (*Tenant, error) {
+	var tenant Tenant
+	uid, err := uuid.Parse(idStr)
+	var q *gorm.DB
+	if err == nil {
+		q = s.db.Where("id = ? AND deleted_at IS NULL", uid)
+	} else {
+		q = s.db.Where("code = ? AND deleted_at IS NULL", idStr)
+	}
+
+	if err := q.First(&tenant).Error; err != nil {
+		return nil, errors.New("tenant tidak ditemukan")
+	}
+
+	var uCount int64
+	var oCount int64
+	s.db.Model(&User{}).Where("tenant_id = ? AND deleted_at IS NULL", tenant.ID).Count(&uCount)
+	s.db.Table("production_orders").Where("tenant_id = ? AND deleted_at IS NULL", tenant.ID).Count(&oCount)
+	tenant.UserCount = uCount
+	tenant.OrderCount = oCount
+
+	return &tenant, nil
+}
+
+func (s *Service) CreateTenant(req CreateTenantRequest) (*Tenant, error) {
+	if strings.TrimSpace(req.Code) == "" || strings.TrimSpace(req.Name) == "" {
+		return nil, errors.New("kode tenant dan nama tenant wajib diisi")
+	}
+
+	code := strings.ToLower(strings.TrimSpace(req.Code))
+
+	var existing Tenant
+	if err := s.db.Where("code = ?", code).First(&existing).Error; err == nil {
+		return nil, errors.New("kode tenant sudah digunakan, silakan pilih kode lain")
+	}
+
+	tenant := Tenant{
+		Code:     code,
+		Name:     strings.TrimSpace(req.Name),
+		Address:  req.Address,
+		Phone:    req.Phone,
+		Email:    req.Email,
+		IsActive: true,
+	}
+
+	if err := s.db.Create(&tenant).Error; err != nil {
+		return nil, err
+	}
+
+	// Create initial Owner/Admin user for this new tenant if requested
+	if req.AdminUsername != "" && req.AdminPassword != "" {
+		var ownerRole Role
+		_ = s.db.Where("name = ?", "OWNER").First(&ownerRole).Error
+		if ownerRole.ID == 0 {
+			ownerRole.ID = 2
+		}
+
+		adminFullName := req.AdminFullName
+		if adminFullName == "" {
+			adminFullName = "Owner " + tenant.Name
+		}
+
+		_, _ = s.CreateUser(CreateUserRequest{
+			TenantID:       tenant.ID.String(),
+			Username:       req.AdminUsername,
+			Password:       req.AdminPassword,
+			FullName:       adminFullName,
+			Email:          req.Email,
+			Phone:          req.Phone,
+			RoleID:         ownerRole.ID,
+			Specialization: "Lab Owner & Director",
+			Skills:         "Manajemen Operasional Lab, QC, Keuangan",
+			WorkSchedule:   "Senin - Sabtu (08:00 - 17:00)",
+			Address:        req.Address,
+			Bio:            fmt.Sprintf("Penanggung jawab operasional %s", tenant.Name),
+		})
+	}
+
+	return s.GetTenant(tenant.ID.String())
+}
+
+func (s *Service) UpdateTenant(idStr string, req UpdateTenantRequest) (*Tenant, error) {
+	uid, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, errors.New("invalid tenant id")
+	}
+
+	var tenant Tenant
+	if err := s.db.Where("id = ? AND deleted_at IS NULL", uid).First(&tenant).Error; err != nil {
+		return nil, errors.New("tenant tidak ditemukan")
+	}
+
+	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+		tenant.Name = strings.TrimSpace(*req.Name)
+	}
+	if req.Address != nil {
+		tenant.Address = *req.Address
+	}
+	if req.Phone != nil {
+		tenant.Phone = *req.Phone
+	}
+	if req.Email != nil {
+		tenant.Email = *req.Email
+	}
+	if req.IsActive != nil {
+		tenant.IsActive = *req.IsActive
+	}
+
+	tenant.UpdatedAt = time.Now()
+	if err := s.db.Save(&tenant).Error; err != nil {
+		return nil, err
+	}
+
+	return s.GetTenant(tenant.ID.String())
+}
+
+func (s *Service) DeleteTenant(idStr string) error {
+	uid, err := uuid.Parse(idStr)
+	if err != nil {
+		return errors.New("invalid tenant id")
+	}
+
+	var tenant Tenant
+	if err := s.db.Where("id = ?", uid).First(&tenant).Error; err != nil {
+		return errors.New("tenant tidak ditemukan")
+	}
+
+	if tenant.Code == "main" {
+		return errors.New("tenant utama (main) tidak dapat dihapus")
+	}
+
+	return s.db.Delete(&tenant).Error
 }
 
 // Attendance & Overtime Management

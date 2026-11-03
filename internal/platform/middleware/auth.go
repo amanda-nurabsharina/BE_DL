@@ -11,6 +11,7 @@ type Claims struct {
 	UserID   string `json:"user_id"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	TenantID string `json:"tenant_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -48,6 +49,7 @@ func AuthMiddleware(jwtSecret string) fiber.Handler {
 		c.Locals("user_id", claims.UserID)
 		c.Locals("username", claims.Username)
 		c.Locals("role", claims.Role)
+		c.Locals("tenant_id", claims.TenantID)
 
 		return c.Next()
 	}

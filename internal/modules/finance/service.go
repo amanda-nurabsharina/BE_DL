@@ -144,12 +144,12 @@ func (s *Service) ensureFinanceSchemaAndSeed() {
 	}
 
 	// 4. Automatically sync invoices for all COMPLETED / DELIVERED production orders
-	_, _ = s.SyncInvoicesFromProduction(nil)
+	_, _ = s.SyncInvoicesFromProduction(nil, nil)
 }
 
-func (s *Service) ListInvoices(status string, customerIDStr string, search string) ([]Invoice, error) {
+func (s *Service) ListInvoices(status string, customerIDStr string, search string, tenantID *uuid.UUID) ([]Invoice, error) {
 	// Ensure any newly completed orders have their invoices generated automatically
-	_, _ = s.SyncInvoicesFromProduction(nil)
+	_, _ = s.SyncInvoicesFromProduction(nil, tenantID)
 
 	var list []Invoice
 	q := s.db.Preload("Customer").
@@ -160,6 +160,9 @@ func (s *Service) ListInvoices(status string, customerIDStr string, search strin
 		Preload("Payments").
 		Where("deleted_at IS NULL")
 
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
@@ -242,6 +245,7 @@ func (s *Service) CreateInvoiceFromOrder(input CreateInvoiceInput) (*Invoice, er
 		}
 
 		inv = Invoice{
+			TenantID:          order.TenantID,
 			InvoiceNumber:     invNum,
 			ProductionOrderID: &order.ID,
 			CustomerID:        order.CustomerID,
@@ -313,6 +317,7 @@ func (s *Service) RecordPayment(input RecordPaymentInput) (*Payment, error) {
 		}
 
 		payment = Payment{
+			TenantID:        inv.TenantID,
 			PaymentNumber:   payNum,
 			InvoiceID:       &inv.ID,
 			CustomerID:      inv.CustomerID,
@@ -363,13 +368,18 @@ func (s *Service) ListExpenseCategories() ([]ExpenseCategory, error) {
 	return cats, err
 }
 
-func (s *Service) ListExpenses() ([]Expense, error) {
+func (s *Service) ListExpenses(tenantID *uuid.UUID) ([]Expense, error) {
 	var expenses []Expense
-	err := s.db.Preload("Category").Order("expense_date DESC, created_at DESC").Find(&expenses).Error
+	q := s.db.Preload("Category")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
+	err := q.Order("expense_date DESC, created_at DESC").Find(&expenses).Error
 	return expenses, err
 }
 
 type CreateExpenseInput struct {
+	TenantID    *uuid.UUID `json:"tenant_id"`
 	CategoryID  int        `json:"category_id"`
 	Amount      float64    `json:"amount"`
 	ExpenseDate time.Time  `json:"expense_date"`
@@ -392,6 +402,7 @@ func (s *Service) CreateExpense(input CreateExpenseInput) (*Expense, error) {
 	}
 
 	exp := Expense{
+		TenantID:      input.TenantID,
 		ExpenseNumber: expNum,
 		CategoryID:    input.CategoryID,
 		Amount:        input.Amount,
@@ -409,12 +420,14 @@ func (s *Service) CreateExpense(input CreateExpenseInput) (*Expense, error) {
 }
 
 // SyncInvoicesFromProduction automatically creates invoices for all COMPLETED / DELIVERED production orders that don't have one yet
-func (s *Service) SyncInvoicesFromProduction(createdBy *uuid.UUID) (int, error) {
+func (s *Service) SyncInvoicesFromProduction(createdBy *uuid.UUID, tenantID *uuid.UUID) (int, error) {
 	var completedOrders []production.ProductionOrder
-	err := s.db.Preload("DentureType").
-		Where("status IN ('COMPLETED', 'DELIVERED') AND deleted_at IS NULL").
-		Order("created_at ASC").
-		Find(&completedOrders).Error
+	q := s.db.Preload("DentureType").
+		Where("status IN ('COMPLETED', 'DELIVERED') AND deleted_at IS NULL")
+	if tenantID != nil {
+		q = q.Where("tenant_id = ?", *tenantID)
+	}
+	err := q.Order("created_at ASC").Find(&completedOrders).Error
 	if err != nil {
 		return 0, err
 	}
@@ -446,14 +459,22 @@ func (s *Service) SyncInvoicesFromProduction(createdBy *uuid.UUID) (int, error) 
 }
 
 // GetFinanceSummary computes daily/monthly sales omzet, gross profit, expenses by category, and active customers
-func (s *Service) GetFinanceSummary() (*FinanceReportSummary, error) {
-	_, _ = s.SyncInvoicesFromProduction(nil)
+func (s *Service) GetFinanceSummary(tenantID *uuid.UUID) (*FinanceReportSummary, error) {
+	_, _ = s.SyncInvoicesFromProduction(nil, tenantID)
 
 	var invoices []Invoice
-	s.db.Preload("Customer").Where("status != 'VOID' AND deleted_at IS NULL").Order("issue_date DESC").Find(&invoices)
+	invQ := s.db.Preload("Customer").Where("status != 'VOID' AND deleted_at IS NULL")
+	if tenantID != nil {
+		invQ = invQ.Where("tenant_id = ?", *tenantID)
+	}
+	invQ.Order("issue_date DESC").Find(&invoices)
 
 	var expenses []Expense
-	s.db.Preload("Category").Order("expense_date DESC").Find(&expenses)
+	expQ := s.db.Preload("Category")
+	if tenantID != nil {
+		expQ = expQ.Where("tenant_id = ?", *tenantID)
+	}
+	expQ.Order("expense_date DESC").Find(&expenses)
 
 	now := time.Now()
 	todayStr := now.Format("2006-01-02")
@@ -519,7 +540,11 @@ func (s *Service) GetFinanceSummary() (*FinanceReportSummary, error) {
 
 	//Also count active customers from production orders
 	var orderCustIDs []string
-	s.db.Table("production_orders").Where("deleted_at IS NULL").Distinct("customer_id").Pluck("customer_id", &orderCustIDs)
+	custQ := s.db.Table("production_orders").Where("deleted_at IS NULL")
+	if tenantID != nil {
+		custQ = custQ.Where("tenant_id = ?", *tenantID)
+	}
+	custQ.Distinct("customer_id").Pluck("customer_id", &orderCustIDs)
 	for _, cid := range orderCustIDs {
 		activeCustMap[cid] = true
 	}

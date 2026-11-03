@@ -45,6 +45,21 @@ func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handl
 	group.Post("/purchase-requests/:id/receive", middleware.RequireRole("OWNER", "ADMIN"), h.ReceiveApprovedPR)
 }
 
+func getTenantID(c *fiber.Ctx) *uuid.UUID {
+	role, _ := c.Locals("role").(string)
+	if role == "SUPER_ADMIN" {
+		if tQuery := c.Query("tenant_id"); tQuery != "" {
+			if parsed, err := uuid.Parse(tQuery); err == nil {
+				return &parsed
+			}
+		}
+	}
+	if tid, ok := c.Locals("tenant_id").(*uuid.UUID); ok {
+		return tid
+	}
+	return nil
+}
+
 func (h *Handler) ListUnits(c *fiber.Ctx) error {
 	units, err := h.service.ListUnits()
 	if err != nil {
@@ -54,7 +69,7 @@ func (h *Handler) ListUnits(c *fiber.Ctx) error {
 }
 
 func (h *Handler) ListSuppliers(c *fiber.Ctx) error {
-	suppliers, err := h.service.ListSuppliers()
+	suppliers, err := h.service.ListSuppliers(getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -66,6 +81,9 @@ func (h *Handler) CreateSupplier(c *fiber.Ctx) error {
 	if err := c.BodyParser(&sup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
 	}
+	if sup.TenantID == nil {
+		sup.TenantID = getTenantID(c)
+	}
 	if err := h.service.CreateSupplier(&sup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -75,7 +93,7 @@ func (h *Handler) CreateSupplier(c *fiber.Ctx) error {
 func (h *Handler) ListItems(c *fiber.Ctx) error {
 	search := c.Query("search")
 	category := c.Query("category")
-	items, err := h.service.ListItems(search, category)
+	items, err := h.service.ListItems(search, category, getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -86,6 +104,9 @@ func (h *Handler) CreateItem(c *fiber.Ctx) error {
 	var input UpsertItemInput
 	if err := c.BodyParser(&input); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
+	}
+	if input.TenantID == nil {
+		input.TenantID = getTenantID(c)
 	}
 	userIDStr, _ := c.Locals("user_id").(string)
 	input.UserID, _ = uuid.Parse(userIDStr)
@@ -135,7 +156,7 @@ func (h *Handler) ListMovements(c *fiber.Ctx) error {
 }
 
 func (h *Handler) GetInventoryReport(c *fiber.Ctx) error {
-	report, err := h.service.GetInventoryReport()
+	report, err := h.service.GetInventoryReport(getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -176,7 +197,7 @@ func (h *Handler) IssueMaterial(c *fiber.Ctx) error {
 
 func (h *Handler) ListPurchaseRequests(c *fiber.Ctx) error {
 	status := c.Query("status")
-	prs, err := h.service.ListPurchaseRequests(status)
+	prs, err := h.service.ListPurchaseRequests(status, getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -187,6 +208,9 @@ func (h *Handler) CreatePurchaseRequest(c *fiber.Ctx) error {
 	var pr PurchaseRequest
 	if err := c.BodyParser(&pr); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
+	}
+	if pr.TenantID == nil {
+		pr.TenantID = getTenantID(c)
 	}
 
 	userIDStr, _ := c.Locals("user_id").(string)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,7 +31,18 @@ func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handl
 
 	// Roles
 	router.Get("/roles", authMiddleware, h.ListRoles)
+	router.Post("/roles", authMiddleware, middleware.RequireRole("SUPER_ADMIN"), h.CreateRole)
+	router.Put("/roles/:id", authMiddleware, middleware.RequireRole("SUPER_ADMIN"), h.UpdateRole)
 	router.Patch("/roles/:id", authMiddleware, middleware.RequireRole("SUPER_ADMIN", "OWNER"), h.UpdateRoleMenus)
+	router.Delete("/roles/:id", authMiddleware, middleware.RequireRole("SUPER_ADMIN"), h.DeleteRole)
+
+	// Tenants (Multi-Tenant Setup & Management - Super Admin Only)
+	tenantsGroup := router.Group("/tenants", authMiddleware)
+	tenantsGroup.Get("/", h.ListTenants)
+	tenantsGroup.Get("/:id", h.GetTenant)
+	tenantsGroup.Post("/", middleware.RequireRole("SUPER_ADMIN"), h.CreateTenant)
+	tenantsGroup.Put("/:id", middleware.RequireRole("SUPER_ADMIN"), h.UpdateTenant)
+	tenantsGroup.Delete("/:id", middleware.RequireRole("SUPER_ADMIN"), h.DeleteTenant)
 
 	// Users CRUD & HR Staff Directory
 	usersGroup := router.Group("/users", authMiddleware)
@@ -107,7 +119,15 @@ func (h *Handler) GetMe(c *fiber.Ctx) error {
 }
 
 func (h *Handler) ListUsers(c *fiber.Ctx) error {
-	users, err := h.service.ListUsers()
+	tenantID := c.Query("tenant_id")
+	userRole, _ := c.Locals("role").(string)
+	if strings.ToUpper(userRole) != "SUPER_ADMIN" && tenantID == "" {
+		if tid, ok := c.Locals("tenant_id").(string); ok && tid != "" {
+			tenantID = tid
+		}
+	}
+
+	users, err := h.service.ListUsers(tenantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   "SERVER_ERROR",
@@ -200,6 +220,93 @@ func (h *Handler) UpdateRoleMenus(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Role permissions updated successfully"})
+}
+
+func (h *Handler) CreateRole(c *fiber.Ctx) error {
+	var req CreateRoleRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+	role, err := h.service.CreateRole(req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": role})
+}
+
+func (h *Handler) UpdateRole(c *fiber.Ctx) error {
+	id, err := strconv.Atoi(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid role ID"})
+	}
+	var req UpdateRoleRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+	role, err := h.service.UpdateRole(id, req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": role})
+}
+
+func (h *Handler) DeleteRole(c *fiber.Ctx) error {
+	id, err := strconv.Atoi(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid role ID"})
+	}
+	if err := h.service.DeleteRole(id); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Role deleted successfully"})
+}
+
+// Tenant Handlers
+func (h *Handler) ListTenants(c *fiber.Ctx) error {
+	tenants, err := h.service.ListTenants()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": tenants})
+}
+
+func (h *Handler) GetTenant(c *fiber.Ctx) error {
+	tenant, err := h.service.GetTenant(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": tenant})
+}
+
+func (h *Handler) CreateTenant(c *fiber.Ctx) error {
+	var req CreateTenantRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+	tenant, err := h.service.CreateTenant(req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": tenant})
+}
+
+func (h *Handler) UpdateTenant(c *fiber.Ctx) error {
+	var req UpdateTenantRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+	tenant, err := h.service.UpdateTenant(c.Params("id"), req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": tenant})
+}
+
+func (h *Handler) DeleteTenant(c *fiber.Ctx) error {
+	if err := h.service.DeleteTenant(c.Params("id")); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Tenant deleted successfully"})
 }
 
 func (h *Handler) GetSettings(c *fiber.Ctx) error {

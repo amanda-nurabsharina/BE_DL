@@ -42,6 +42,7 @@ func (ProductionStageTemplate) TableName() string {
 
 type ProductionOrder struct {
 	ID                  uuid.UUID            `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	TenantID            *uuid.UUID           `gorm:"type:uuid" json:"tenant_id"`
 	OrderNumber         string               `gorm:"uniqueIndex;not null" json:"order_number"`
 	CustomerID          uuid.UUID            `json:"customer_id"`
 	Customer            customers.Customer   `gorm:"foreignKey:CustomerID" json:"customer"`

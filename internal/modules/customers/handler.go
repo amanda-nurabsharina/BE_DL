@@ -32,7 +32,14 @@ func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handl
 
 func (h *Handler) List(c *fiber.Ctx) error {
 	search := c.Query("search")
-	list, err := h.service.List(search)
+	tenantID := c.Query("tenant_id")
+	userRole, _ := c.Locals("role").(string)
+	if userRole != "SUPER_ADMIN" && tenantID == "" {
+		if tid, ok := c.Locals("tenant_id").(string); ok && tid != "" {
+			tenantID = tid
+		}
+	}
+	list, err := h.service.List(search, tenantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   "SERVER_ERROR",
@@ -82,6 +89,12 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 			"error":   "VALIDATION_ERROR",
 			"message": "Doctor name and phone number are required",
 		})
+	}
+
+	if req.TenantID == "" {
+		if tid, ok := c.Locals("tenant_id").(string); ok && tid != "" {
+			req.TenantID = tid
+		}
 	}
 
 	cust, err := h.service.Create(req)
@@ -154,7 +167,14 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 func (h *Handler) ListPatients(c *fiber.Ctx) error {
 	search := c.Query("search")
 	customerID := c.Query("customer_id")
-	list, err := h.service.ListPatients(search, customerID)
+	tenantID := c.Query("tenant_id")
+	userRole, _ := c.Locals("role").(string)
+	if userRole != "SUPER_ADMIN" && tenantID == "" {
+		if tid, ok := c.Locals("tenant_id").(string); ok && tid != "" {
+			tenantID = tid
+		}
+	}
+	list, err := h.service.ListPatients(search, customerID, tenantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   "SERVER_ERROR",
@@ -180,6 +200,12 @@ func (h *Handler) CreatePatient(c *fiber.Ctx) error {
 			"error":   "VALIDATION_ERROR",
 			"message": "Patient name is required",
 		})
+	}
+
+	if req.TenantID == "" {
+		if tid, ok := c.Locals("tenant_id").(string); ok && tid != "" {
+			req.TenantID = tid
+		}
 	}
 
 	pat, err := h.service.CreatePatient(req)

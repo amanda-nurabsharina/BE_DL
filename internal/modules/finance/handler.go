@@ -36,8 +36,23 @@ func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handl
 	group.Post("/expenses", middleware.RequireRole("SUPER_ADMIN", "OWNER", "ADMIN", "CASHIER"), h.CreateExpense)
 }
 
+func getTenantID(c *fiber.Ctx) *uuid.UUID {
+	role, _ := c.Locals("role").(string)
+	if role == "SUPER_ADMIN" {
+		if tQuery := c.Query("tenant_id"); tQuery != "" {
+			if parsed, err := uuid.Parse(tQuery); err == nil {
+				return &parsed
+			}
+		}
+	}
+	if tid, ok := c.Locals("tenant_id").(*uuid.UUID); ok {
+		return tid
+	}
+	return nil
+}
+
 func (h *Handler) GetFinanceSummary(c *fiber.Ctx) error {
-	summary, err := h.service.GetFinanceSummary()
+	summary, err := h.service.GetFinanceSummary(getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -50,7 +65,7 @@ func (h *Handler) SyncInvoicesFromProduction(c *fiber.Ctx) error {
 	if uid, err := uuid.Parse(userIDStr); err == nil {
 		createdBy = &uid
 	}
-	count, err := h.service.SyncInvoicesFromProduction(createdBy)
+	count, err := h.service.SyncInvoicesFromProduction(createdBy, getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -66,7 +81,7 @@ func (h *Handler) ListInvoices(c *fiber.Ctx) error {
 	customerID := c.Query("customer_id")
 	search := c.Query("search")
 
-	invoices, err := h.service.ListInvoices(status, customerID, search)
+	invoices, err := h.service.ListInvoices(status, customerID, search, getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -131,7 +146,7 @@ func (h *Handler) ListExpenseCategories(c *fiber.Ctx) error {
 }
 
 func (h *Handler) ListExpenses(c *fiber.Ctx) error {
-	expenses, err := h.service.ListExpenses()
+	expenses, err := h.service.ListExpenses(getTenantID(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -142,6 +157,9 @@ func (h *Handler) CreateExpense(c *fiber.Ctx) error {
 	var input CreateExpenseInput
 	if err := c.BodyParser(&input); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
+	}
+	if input.TenantID == nil {
+		input.TenantID = getTenantID(c)
 	}
 
 	userIDStr, _ := c.Locals("user_id").(string)
